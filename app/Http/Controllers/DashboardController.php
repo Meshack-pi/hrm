@@ -10,8 +10,10 @@ use App\Models\PayrollRun;
 use App\Models\Payslip;
 use App\Models\PublicHoliday;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Inertia\Inertia;
 
 class DashboardController extends Controller
@@ -28,7 +30,90 @@ class DashboardController extends Controller
             'contractsEnding' => $user->can('employees.view_all') ? $this->contractsEnding() : null,
             'me' => $user->employee_id ? $this->me($user) : null,
             'nextHoliday' => $this->nextHoliday(),
+            'charts' => $this->charts($user),
         ]);
+    }
+
+    /**
+     * Trend and breakdown series for the dashboard charts, each null when the user may not see it.
+     *
+     * @return array{payrollTrend: ?array, headcountTrend: ?array, leaveTrend: ?array, byDepartment: ?array}
+     */
+    private function charts(User $user): array
+    {
+        $employees = $this->visibleEmployees($user);
+        $months = collect(range(11, 0))->map(fn (int $ago) => today()->startOfMonth()->subMonths($ago));
+
+        return [
+            'payrollTrend' => $this->canSeePayroll($user) ? $this->payrollTrend() : null,
+            'headcountTrend' => $employees ? $this->headcountTrend(clone $employees, $months) : null,
+            'leaveTrend' => $employees ? $this->leaveTrend(clone $employees, $months) : null,
+            'byDepartment' => $employees ? (clone $employees)
+                ->whereIn('status', Employee::PAYABLE_STATUSES)
+                ->with('department:id,name')
+                ->get(['id', 'department_id'])
+                ->countBy(fn (Employee $e) => $e->department?->name ?? 'Unassigned')
+                ->map(fn (int $count, string $name) => ['label' => $name, 'value' => $count])
+                ->values()
+                ->all() : null,
+        ];
+    }
+
+    /**
+     * Gross and net pay for the last 12 calculated payroll runs, oldest first.
+     *
+     * @return list<array{period: string, gross: float, net: float}>
+     */
+    private function payrollTrend(): array
+    {
+        return PayrollRun::where('status', '!=', 'draft')
+            ->orderByDesc('period_year')->orderByDesc('period_month')
+            ->limit(12)->get()
+            ->reverse()
+            ->map(fn (PayrollRun $run) => [
+                'period' => now()->setDate($run->period_year, $run->period_month, 1)->format('M Y'),
+                'gross' => (float) $run->total_gross,
+                'net' => (float) $run->total_net,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Current (non-inactive) staff who had been hired by the end of each month.
+     *
+     * @param  Collection<int, Carbon>  $months
+     * @return list<array{period: string, employees: int}>
+     */
+    private function headcountTrend(Builder $employees, Collection $months): array
+    {
+        $hireDates = $employees->where('status', '!=', 'inactive')->pluck('hire_date');
+
+        return $months->map(fn (Carbon $month) => [
+            'period' => $month->format('M Y'),
+            'employees' => $hireDates->filter(fn ($date) => Carbon::parse($date)->lte($month->copy()->endOfMonth()))->count(),
+        ])->all();
+    }
+
+    /**
+     * Approved leave days per month (by start date) for the visible employees.
+     *
+     * @param  Collection<int, Carbon>  $months
+     * @return list<array{period: string, days: float}>
+     */
+    private function leaveTrend(Builder $employees, Collection $months): array
+    {
+        $daysByMonth = LeaveRequest::where('status', 'approved')
+            ->whereIn('employee_id', $employees->select('id'))
+            ->whereDate('start_date', '>=', $months->first())
+            ->get(['start_date', 'days'])
+            ->groupBy(fn (LeaveRequest $r) => $r->start_date->format('Y-m'))
+            ->map(fn (Collection $requests) => (float) $requests->sum('days'));
+
+        return $months->map(fn (Carbon $month) => [
+            'period' => $month->format('M Y'),
+            'days' => $daysByMonth->get($month->format('Y-m'), 0.0),
+        ])->all();
     }
 
     private function nextHoliday(): ?array
@@ -100,9 +185,14 @@ class DashboardController extends Controller
         ];
     }
 
+    private function canSeePayroll(User $user): bool
+    {
+        return $user->canAny(['payroll.create', 'payroll.calculate', 'payroll.approve', 'payroll.mark_paid', 'payroll.export']);
+    }
+
     private function latestRun(User $user): ?array
     {
-        if (! $user->canAny(['payroll.create', 'payroll.calculate', 'payroll.approve', 'payroll.mark_paid', 'payroll.export'])) {
+        if (! $this->canSeePayroll($user)) {
             return null;
         }
 

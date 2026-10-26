@@ -1,5 +1,7 @@
 <script setup>
 import AppLayout from '@/Layouts/AppLayout.vue';
+import LineChart from '@/Components/LineChart.vue';
+import PieChart3D from '@/Components/PieChart3D.vue';
 import StatusBadge from '@/Components/StatusBadge.vue';
 import { Head, Link, usePage } from '@inertiajs/vue3';
 import { usePermissions } from '@/composables/usePermissions';
@@ -13,6 +15,7 @@ const props = defineProps({
     contractsEnding: { type: Array, default: null },
     me: { type: Object, default: null },
     nextHoliday: { type: Object, default: null },
+    charts: { type: Object, default: () => ({}) },
 });
 
 const { can, canAny } = usePermissions();
@@ -85,6 +88,29 @@ const quickActions = computed(() => [
 ].filter((a) => a.show).slice(0, 4));
 
 const card = 'rounded-xl border border-gray-200 bg-white p-5 shadow-sm';
+
+// Fixed categorical order from the validated chart palette (see PieChart3D); single series use brand green.
+const SERIES = { gross: '#2a78d6', net: '#eb6834', single: '#2E7D32' };
+
+const payrollTrend = computed(() => props.charts?.payrollTrend ?? null);
+const payrollChange = computed(() => {
+    const t = payrollTrend.value ?? [];
+    if (t.length < 2 || !t[t.length - 2].net) return null;
+    return ((t[t.length - 1].net - t[t.length - 2].net) / t[t.length - 2].net) * 100;
+});
+
+const headcountTrend = computed(() => props.charts?.headcountTrend ?? null);
+const leaveTrend = computed(() => props.charts?.leaveTrend ?? null);
+const leaveDaysTotal = computed(() => (leaveTrend.value ?? []).reduce((sum, m) => sum + m.days, 0));
+
+const farmBars = computed(() => {
+    const farms = props.stats?.farms?.breakdown ?? [];
+    const max = Math.max(1, ...farms.map((f) => f.employees));
+    return [...farms].sort((a, b) => b.employees - a.employees).map((f) => ({ ...f, width: (f.employees / max) * 100 }));
+});
+
+const kes = (v) => `KES ${whole(v)}`;
+const shortPeriod = (period) => period.replace(/ (\d{2})(\d{2})$/, " '$2");
 </script>
 
 <template>
@@ -153,6 +179,97 @@ const card = 'rounded-xl border border-gray-200 bg-white p-5 shadow-sm';
                     </span>
                 </div>
             </Link>
+        </div>
+
+        <!-- Charts -->
+        <div v-if="payrollTrend" :class="card" class="mt-6">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h3 class="text-sm font-semibold text-gray-900">Payroll cost trend</h3>
+                    <p class="text-xs text-gray-500">Gross vs net pay per payroll run (KES)</p>
+                </div>
+                <div v-if="payrollTrend.length" class="text-right">
+                    <p class="text-xs text-gray-500">Latest net pay · {{ payrollTrend[payrollTrend.length - 1].period }}</p>
+                    <p class="text-xl font-bold tabular-nums text-gray-900">{{ kes(payrollTrend[payrollTrend.length - 1].net) }}</p>
+                    <p
+                        v-if="payrollChange !== null"
+                        class="text-xs font-medium"
+                        :class="payrollChange >= 0 ? 'text-green-700' : 'text-red-700'"
+                    >
+                        {{ payrollChange >= 0 ? '▲' : '▼' }} {{ Math.abs(payrollChange).toFixed(1) }}% vs previous run
+                    </p>
+                </div>
+            </div>
+            <LineChart
+                class="mt-4"
+                :labels="payrollTrend.map((p) => shortPeriod(p.period))"
+                :series="[
+                    { name: 'Gross pay', values: payrollTrend.map((p) => p.gross), color: SERIES.gross },
+                    { name: 'Net pay', values: payrollTrend.map((p) => p.net), color: SERIES.net },
+                ]"
+                :format="kes"
+                :height="260"
+            />
+        </div>
+
+        <div v-if="headcountTrend || leaveTrend" class="mt-4 grid gap-4 lg:grid-cols-2">
+            <div v-if="headcountTrend" :class="card">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <h3 class="text-sm font-semibold text-gray-900">Headcount growth</h3>
+                        <p class="text-xs text-gray-500">Current staff by hire date, last 12 months</p>
+                    </div>
+                    <p class="text-xl font-bold tabular-nums text-gray-900">{{ whole(headcountTrend[headcountTrend.length - 1].employees) }}</p>
+                </div>
+                <LineChart
+                    class="mt-4"
+                    :labels="headcountTrend.map((m) => shortPeriod(m.period))"
+                    :series="[{ name: 'Employees', values: headcountTrend.map((m) => m.employees), color: SERIES.single }]"
+                    :format="(v) => `${whole(v)} employees`"
+                    area
+                />
+            </div>
+
+            <div v-if="leaveTrend" :class="card">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <h3 class="text-sm font-semibold text-gray-900">Leave days taken</h3>
+                        <p class="text-xs text-gray-500">Approved leave by start month, last 12 months</p>
+                    </div>
+                    <p class="text-xl font-bold tabular-nums text-gray-900">{{ days(leaveDaysTotal) }} <span class="text-sm font-normal text-gray-500">days</span></p>
+                </div>
+                <LineChart
+                    class="mt-4"
+                    :labels="leaveTrend.map((m) => shortPeriod(m.period))"
+                    :series="[{ name: 'Leave days', values: leaveTrend.map((m) => m.days), color: SERIES.single }]"
+                    :format="(v) => `${days(v)} days`"
+                    area
+                />
+            </div>
+        </div>
+
+        <div v-if="farmBars.length || charts?.byDepartment?.length" class="mt-4 grid gap-4 lg:grid-cols-2">
+            <div v-if="farmBars.length" :class="card">
+                <h3 class="text-sm font-semibold text-gray-900">Employees by farm</h3>
+                <p class="text-xs text-gray-500">Active and on-leave staff</p>
+                <ul class="mt-4 space-y-3">
+                    <li v-for="f in farmBars" :key="f.code" :title="`${f.name}: ${whole(f.employees)} employees`">
+                        <div class="flex items-center justify-between text-sm">
+                            <span class="truncate text-gray-700">{{ f.name }}</span>
+                            <span class="font-medium tabular-nums text-gray-900">{{ whole(f.employees) }}</span>
+                        </div>
+                        <div class="mt-1 h-2.5 rounded-full bg-gray-100">
+                            <div class="h-2.5 rounded-full bg-[#2E7D32] transition-all" :style="{ width: `${f.width}%` }" />
+                        </div>
+                    </li>
+                </ul>
+            </div>
+
+            <div v-if="charts?.byDepartment?.length" :class="card">
+                <h3 class="text-sm font-semibold text-gray-900">Employees by department</h3>
+                <p class="mb-4 text-xs text-gray-500">Active and on-leave staff</p>
+                <PieChart3D :items="charts.byDepartment" unit="employee" />
+            </div>
         </div>
 
         <!-- My leave & pay (anyone linked to an employee record) -->
