@@ -44,13 +44,20 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - run: php artisan test
+      - run: php artisan test --parallel
 
   BUILD-AND-DEPLOY:
     needs: TEST
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Vite imports Ziggy from vendor/tightenco/ziggy, so PHP deps must exist before building assets
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, dom, fileinfo, gd, bcmath, zip
+      - run: composer install --prefer-dist --no-interaction --no-progress --no-dev --no-scripts
 
       # Build assets on the runner (the server never gets node_modules)
       - uses: actions/setup-node@v4
